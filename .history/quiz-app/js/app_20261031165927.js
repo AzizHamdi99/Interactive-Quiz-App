@@ -105,11 +105,13 @@ const App = (() => {
   }
 
   /* ---- Result page ---- */
+  /* ---- Result page ---- */
   if (document.body.dataset.page === "result") {
     const score = Number(sessionStorage.getItem("quizScore")) || 0;
     const total = Number(sessionStorage.getItem("quizTotal")) || 10;
+    const pts = Number(sessionStorage.getItem("quizPoints")) || 0;
     const pct = Math.round((score / total) * 100);
-    const best = Number(localStorage.getItem("quizBest")) || 0;
+    const scores = JSON.parse(localStorage.getItem("quizScores") || "[]");
     const msgs = [
       [100, "Outstanding!"],
       [80, "Excellent!"],
@@ -119,10 +121,22 @@ const App = (() => {
     ];
     document.querySelector("#score").textContent = `${score} / ${total}`;
     document.querySelector("#pct").textContent = `${pct}%`;
+    document.querySelector("#points").textContent = `${pts} pts`;
     document.querySelector("#msg").textContent = msgs.find(
       (m) => pct >= m[0],
     )[1];
-    document.querySelector("#best").textContent = `${best} / ${total}`;
+    document.querySelector("#best").textContent =
+      `${scores.length ? scores[0].points : 0} pts`;
+    const top = document.querySelector("#top");
+    scores.forEach((s) => {
+      const li = document.createElement("li");
+      li.textContent = `${s.points} pts · ${s.correct}/${s.total} · ${s.date}`;
+      top.appendChild(li);
+    });
+    document.querySelector("#reset-scores").addEventListener("click", () => {
+      localStorage.removeItem("quizScores");
+      location.reload();
+    });
     if (pct > 80) confetti();
   }
 

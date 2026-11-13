@@ -1,6 +1,5 @@
-/* Quiz engine: shuffling, timer, feedback, score, progress, localStorage */
-const TOTAL = 10,
-  TIME_LIMIT = 20;
+/* Quiz engine: questions come from PHP, answers are validated by PHP */
+const TIME_LIMIT = 20;
 const $ = (s) => document.querySelector(s);
 const counter = $("#counter"),
   bar = $("#bar"),
@@ -14,46 +13,25 @@ const prevBtn = $("#prev"),
   timerEl = $("#timer");
 const live = $("#live");
 
-// Fisher-Yates shuffle (returns a new array)
-function shuffle(list) {
-  const a = [...list];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-// Randomize question order and answer order; remember which answer is correct
-const quiz = shuffle(questions)
-  .slice(0, TOTAL)
-  .map((q) => {
-    const list = q.answers.map((text, i) => ({
-      text,
-      isCorrect: i === q.correct,
-    }));
-    return {
-      question: q.question,
-      type: q.type || "mcq",
-      answers: q.type === "tf" ? list : shuffle(list), // Vrai/Faux : on ne mélange pas
-    };
-  });
-
-let current = 0,
+let quiz = [],
+  results = [], // per question: {picked, ok, correct_id, points} (from PHP)
+  current = 0,
   timeLeft = TIME_LIMIT,
   timerId = null,
-  advanceId = null;
-const picked = new Array(quiz.length).fill(undefined); // chosen index, -1 = timed out
-const MAX_POINTS = 100,
-  MIN_POINTS = 40,
-  PENALTY = 3; // -3 pts par seconde écoulée
-const points = new Array(quiz.length).fill(0);
-const totalPoints = () => points.reduce((a, b) => a + b, 0);
-const score = () =>
-  picked.filter((p, i) => p >= 0 && quiz[i].answers[p].isCorrect).length;
+  advanceId = null,
+  busy = false;
+
+const totalPoints = () => results.reduce((s, r) => s + (r ? r.points : 0), 0);
+const score = () => results.filter((r) => r && r.ok).length;
+
+async function post(url, data) {
+  const res = await fetch(url, { method: "POST", body: new URLSearchParams(data) });
+  if (!res.ok) throw new Error("Server error");
+  return res.json();
+}
 
 function setProgress() {
-  const answered = picked.filter((p) => p !== undefined).length;
+  const answered = results.filter((r) => r !== undefined).length;
   const pct = Math.round((answered / quiz.length) * 100);
   bar.style.width = pct + "%";
   percent.textContent = pct + "%";
@@ -65,10 +43,8 @@ function stopTimer() {
   clearInterval(timerId);
   timerEl.parentElement.classList.remove("low");
 }
-
-function startTimer() {
+function runTimer() {
   stopTimer();
-  timeLeft = TIME_LIMIT;
   timerEl.textContent = timeLeft;
   timerId = setInterval(() => {
     timeLeft--;
@@ -77,21 +53,42 @@ function startTimer() {
     if (timeLeft <= 0) timeUp();
   }, 1000);
 }
+function startTimer() {
+  timeLeft = TIME_LIMIT;
+  runTimer();
+}
 
-function timeUp() {
+async function timeUp() {
   stopTimer();
-  picked[current] = -1;
+  if (busy || results[current] !== undefined) return;
+  busy = true;
+  const idx = current;
+  try {
+    const r = await post("php/check_answer.php", {
+      question_id: quiz[idx].id,
+      answer_id: 0,
+      elapsed: TIME_LIMIT,
+    });
+    results[idx] = { ...r, picked: -1 };
+  } catch (e) {
+    busy = false;
+    feedback.textContent = "Server error.";
+    return;
+  }
+  busy = false;
   App.playWrong();
-  reveal();
-  setProgress();
-  advanceId = setTimeout(goNext, 1500); // auto move on
+  if (idx === current) {
+    reveal();
+    setProgress();
+    advanceId = setTimeout(goNext, 1500);
+  }
 }
 
 function render() {
   clearTimeout(advanceId);
   const card = document.querySelector(".quiz-card");
   card.classList.remove("swap");
-  void card.offsetWidth; // relance l'animation
+  void card.offsetWidth;
   card.classList.add("swap");
   counter.textContent = `Question ${current + 1} / ${quiz.length} · ${quiz[current].type === "tf" ? "True/False" : "MCQ"}`;
   questionEl.textContent = quiz[current].question;
@@ -111,7 +108,7 @@ function render() {
   });
   prevBtn.disabled = current === 0;
   nextBtn.textContent = current === quiz.length - 1 ? "Finish" : "Next";
-  if (picked[current] === undefined) {
+  if (results[current] === undefined) {
     nextBtn.disabled = true;
     startTimer();
   } else {
@@ -123,43 +120,54 @@ function render() {
   questionEl.focus();
 }
 
-function choose(i) {
-  if (picked[current] !== undefined) return; // already answered
-  picked[current] = i;
+async function choose(i) {
+  if (results[current] !== undefined || busy) return;
+  busy = true;
   stopTimer();
-  if (quiz[current].answers[i].isCorrect) {
-    const elapsed = TIME_LIMIT - timeLeft;
-    points[current] = Math.max(MIN_POINTS, MAX_POINTS - PENALTY * elapsed);
-    App.playCorrect();
-  } else {
-    App.playWrong();
+  const idx = current,
+    answer = quiz[idx].answers[i];
+  try {
+    const r = await post("php/check_answer.php", {
+      question_id: quiz[idx].id,
+      answer_id: answer.id,
+      elapsed: TIME_LIMIT - timeLeft,
+    });
+    results[idx] = { ...r, picked: answer.id };
+  } catch (e) {
+    busy = false;
+    feedback.textContent = "Server error, try again.";
+    runTimer(); // resume the timer
+    return;
   }
-  reveal();
-  setProgress();
+  busy = false;
+  results[idx].ok ? App.playCorrect() : App.playWrong();
+  if (idx === current) {
+    reveal();
+    setProgress();
+  }
 }
 
-// Show colors, icons and message for the current question
+// Colors, icons and message for the current question (data comes from PHP)
 function reveal() {
-  const choice = picked[current];
+  const r = results[current];
   answersEl.querySelectorAll(".answer").forEach((btn, i) => {
-    const isCorrect = quiz[current].answers[i].isCorrect;
+    const id = quiz[current].answers[i].id;
     btn.classList.add("locked");
     btn.setAttribute("aria-disabled", "true");
-    if (isCorrect) {
+    if (id === r.correct_id) {
       btn.classList.add("correct");
       btn.querySelector(".icon").textContent = "\u2713";
-    } else if (i === choice) {
+    } else if (id === r.picked) {
       btn.classList.add("wrong");
       btn.querySelector(".icon").textContent = "\u2717";
     }
   });
-  const ok = choice >= 0 && quiz[current].answers[choice].isCorrect;
-  feedback.textContent = ok
-    ? `Correct! +${points[current]} pts`
-    : choice === -1
+  feedback.textContent = r.ok
+    ? `Correct! +${r.points} pts`
+    : r.picked === -1
       ? "Time's up!"
       : "Wrong!";
-  feedback.classList.add(ok ? "ok" : "bad");
+  feedback.classList.add(r.ok ? "ok" : "bad");
   nextBtn.disabled = false;
 }
 
@@ -171,22 +179,19 @@ function goNext() {
   } else finish();
 }
 
-function finish() {
+async function finish() {
   stopTimer();
-  const pts = totalPoints();
-  sessionStorage.setItem("quizScore", score());
-  sessionStorage.setItem("quizTotal", quiz.length);
-  sessionStorage.setItem("quizPoints", pts);
-  const scores = JSON.parse(localStorage.getItem("quizScores") || "[]");
-  scores.push({
-    points: pts,
-    correct: score(),
-    total: quiz.length,
-    date: new Date().toLocaleDateString(),
-  });
-  scores.sort((a, b) => b.points - a.points);
-  localStorage.setItem("quizScores", JSON.stringify(scores.slice(0, 5)));
-  App.go("result.html");
+  try {
+    const r = await post("php/save_score.php", {
+      player: localStorage.getItem("quizPlayer") || "",
+    });
+    sessionStorage.setItem("quizScore", r.score);
+    sessionStorage.setItem("quizTotal", r.total);
+    sessionStorage.setItem("quizPoints", r.points);
+    App.go("result.html");
+  } catch (e) {
+    feedback.textContent = "Could not save your score. Try again.";
+  }
 }
 
 nextBtn.addEventListener("click", goNext);
@@ -198,9 +203,22 @@ prevBtn.addEventListener("click", () => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  // keys 1-4 pick answers
   const n = Number(e.key);
-  if (n >= 1 && n <= 4 && picked[current] === undefined) choose(n - 1);
+  if (n >= 1 && n <= 4 && quiz[current] && quiz[current].answers[n - 1]) choose(n - 1);
 });
 
-render();
+// Load the questions from PHP, then start
+(async function init() {
+  try {
+    const res = await fetch("php/get_questions.php");
+    if (!res.ok) throw new Error();
+    quiz = await res.json();
+    results = new Array(quiz.length).fill(undefined);
+    render();
+  } catch (e) {
+    questionEl.textContent =
+      "Could not load questions. Open the site through http://localhost (XAMPP/WAMP) and import sql/database.sql.";
+    nextBtn.disabled = prevBtn.disabled = true;
+    timerEl.textContent = "-";
+  }
+})();

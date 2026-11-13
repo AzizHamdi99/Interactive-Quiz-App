@@ -278,6 +278,27 @@ main {
   margin: 0 auto;
   animation: bob 4s ease-in-out infinite;
 }
+.player-input {
+  display: block;
+  margin: 0.75rem 0;
+  padding: 0.8rem 1rem;
+  width: 100%;
+  max-width: 300px;
+  border-radius: 12px;
+  border: 2px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font:
+    500 1rem "Poppins",
+    sans-serif;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
 @keyframes bob {
   50% {
     transform: translateY(-12px);
